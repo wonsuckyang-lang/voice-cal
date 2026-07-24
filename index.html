@@ -148,7 +148,30 @@ const CAL_ID = "primary";   // 기본 캘린더
 
 /* ==================================================================== */
 const $ = id => document.getElementById(id);
-let tokenClient = null, accessToken = null, parsed = null;
+let tokenClient = null, accessToken = null, tokenExpiry = 0, parsed = null;
+
+/* ---------- 토큰 저장/불러오기 (자동 로그인 유지) ---------- */
+function loadToken(){
+  try{
+    const o = JSON.parse(localStorage.getItem("vc_token") || "null");
+    if(o && o.token && o.expiry > Date.now() + 60000){
+      accessToken = o.token; tokenExpiry = o.expiry; return true;
+    }
+  }catch(e){}
+  return false;
+}
+function saveToken(token, expiresInSec){
+  accessToken = token;
+  tokenExpiry = Date.now() + (expiresInSec * 1000);
+  try{ localStorage.setItem("vc_token", JSON.stringify({token, expiry: tokenExpiry})); }catch(e){}
+  try{ localStorage.setItem("vc_authed", "1"); }catch(e){}
+}
+function everAuthed(){ try{ return localStorage.getItem("vc_authed") === "1"; }catch(e){ return false; } }
+function tokenValid(){ return accessToken && tokenExpiry > Date.now() + 30000; }
+function markSignedIn(){ $("authBtn").textContent = "✓ 로그인됨"; $("authBtn").classList.add("signed"); }
+
+/* 화면 없이 조용히 토큰 재발급 (구글 세션이 살아있으면 성공) */
+function silentAuth(){ if(tokenClient) try{ tokenClient.requestAccessToken({prompt:""}); }catch(e){} }
 
 /* ---------- 구글 로그인 (Google Identity Services) ---------- */
 function initGis(){
@@ -158,18 +181,23 @@ function initGis(){
     client_id: CLIENT_ID,
     scope: SCOPES,
     callback: (resp)=>{
-      if(resp.error){ setStatus("로그인 실패: "+resp.error, "err"); return; }
-      accessToken = resp.access_token;
-      $("authBtn").textContent = "✓ 로그인됨";
-      $("authBtn").classList.add("signed");
-      setStatus("구글 계정에 연결되었습니다.", "ok");
-      if(pendingSave){ pendingSave=false; saveEvent(); }
+      if(resp.error){
+        if(pendingSave){ setStatus("로그인이 필요합니다. 우측 상단 로그인을 눌러주세요.", "err"); }
+        return;
+      }
+      saveToken(resp.access_token, resp.expires_in || 3600);
+      markSignedIn();
+      if(pendingSave){ pendingSave = false; saveEvent(); }
     }
   });
+  // 앱을 열 때: 저장된 토큰이 유효하면 그대로, 만료됐지만 이전에 승인했으면 조용히 갱신
+  if(loadToken()){ markSignedIn(); silentAuth(); /* 백그라운드 선갱신 */ }
+  else if(everAuthed()){ markSignedIn(); silentAuth(); }
 }
 $("authBtn").onclick = ()=>{
   if(!tokenClient){ setStatus("클라이언트 ID를 먼저 설정하세요.", "err"); return; }
-  tokenClient.requestAccessToken({prompt: accessToken ? "" : "consent"});
+  // 최초 1회만 동의창, 이후엔 조용히
+  tokenClient.requestAccessToken({ prompt: everAuthed() ? "" : "consent" });
 };
 
 /* ---------- 음성 인식 (Web Speech API) ---------- */
@@ -273,8 +301,11 @@ $("cancelBtn").onclick = ()=>{ $("reviewCard").classList.remove("show"); setStat
 /* ---------- 캘린더 등록 ---------- */
 let pendingSave = false;
 $("saveBtn").onclick = ()=>{
-  if(!accessToken){ pendingSave=true; setStatus("구글 로그인 창을 엽니다…","info");
-    if(tokenClient) tokenClient.requestAccessToken({prompt:"consent"}); return; }
+  if(!tokenValid()){
+    pendingSave = true; setStatus("구글 연결 확인 중…", "info");
+    if(tokenClient) tokenClient.requestAccessToken({ prompt: everAuthed() ? "" : "consent" });
+    return;
+  }
   saveEvent();
 };
 async function saveEvent(){
@@ -296,8 +327,9 @@ async function saveEvent(){
       headers:{ "Authorization":"Bearer "+accessToken, "Content-Type":"application/json" },
       body: JSON.stringify(body)
     });
-    if(r.status===401){ accessToken=null; pendingSave=true;
-      tokenClient.requestAccessToken({prompt:""}); return; }
+    if(r.status===401){ accessToken=null; tokenExpiry=0;
+      try{ localStorage.removeItem("vc_token"); }catch(e){}
+      pendingSave=true; tokenClient.requestAccessToken({ prompt: everAuthed() ? "" : "consent" }); return; }
     if(!r.ok){ throw new Error("HTTP "+r.status+" "+(await r.text())); }
     const ev = await r.json();
     setStatus("✓ 구글 캘린더에 등록되었습니다.","ok");
