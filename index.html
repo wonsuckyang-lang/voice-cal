@@ -100,7 +100,9 @@
     <button id="micBtn" aria-label="녹음">🎤</button>
     <div class="hint">
       버튼을 누르고 말하세요<br>
-      예) <b>"7월 24일 15시에 김대리 상담 기록해줘"</b>
+      "<b>7월 24일 15시에 김대리 상담 기록</b>"<br>
+      "<b>다음주 화요일 10시에 행정심판 상담 기록</b>"<br>
+      "<b>8월 3일 산재 서류 검토 기록</b>" (시간 생략 시 오전 9시)
     </div>
   </div>
 
@@ -198,31 +200,34 @@ $("micBtn").onclick = ()=>{
 };
 
 /* ---------- 한국어 날짜/시간 파서 ---------- */
-const KNUM = {영:0,공:0,일:1,이:2,삼:3,사:4,오:5,육:6,칠:7,팔:8,구:9,십:10};
-function korToNum(s){
-  if(/^\d+$/.test(s)) return parseInt(s,10);
-  if(s in KNUM) return KNUM[s];
-  // 간단한 십단위 (열, 스물 등은 시계 표현에서 드물어 숫자 위주)
-  return NaN;
-}
+const WD = {일:0,월:1,화:2,수:3,목:4,금:5,토:6}; // JS getDay 기준 (일=0)
 function parseKorean(text){
   const t = text.replace(/\s+/g,' ').trim();
   const now = new Date();
   let year = now.getFullYear(), month=null, day=null, hour=null, min=0;
-
-  // 상대 날짜
   const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if(/모레|내일모레/.test(t)){ base.setDate(base.getDate()+2); month=base.getMonth()+1; day=base.getDate(); }
-  else if(/내일/.test(t)){ base.setDate(base.getDate()+1); month=base.getMonth()+1; day=base.getDate(); }
+
+  // 요일: "다음주/이번주 X요일", 또는 그냥 "X요일"
+  const wdMatch = t.match(/(월|화|수|목|금|토|일)\s*요일/);
+  if(wdMatch){
+    const target = WD[wdMatch[1]], cur = base.getDay();
+    const thisMon = new Date(base); thisMon.setDate(base.getDate() + (cur===0 ? -6 : 1-cur));
+    const offset = (target===0 ? 6 : target-1); // 월=0 … 일=6
+    let d;
+    if(/(다음\s*주|담주|다음주)/.test(t)){ d=new Date(thisMon); d.setDate(thisMon.getDate()+7+offset); }
+    else if(/(이번\s*주|이번주)/.test(t)){ d=new Date(thisMon); d.setDate(thisMon.getDate()+offset); }
+    else { let delta=(target-cur+7)%7; if(delta===0) delta=7; d=new Date(base); d.setDate(base.getDate()+delta); }
+    year=d.getFullYear(); month=d.getMonth()+1; day=d.getDate();
+  }
+
+  // 상대 날짜 (오늘/내일/모레) — 요일보다 우선
+  if(/모레|내일모레/.test(t)){ const b=new Date(base); b.setDate(b.getDate()+2); year=b.getFullYear(); month=b.getMonth()+1; day=b.getDate(); }
+  else if(/내일/.test(t)){ const b=new Date(base); b.setDate(b.getDate()+1); year=b.getFullYear(); month=b.getMonth()+1; day=b.getDate(); }
   else if(/오늘/.test(t)){ month=base.getMonth()+1; day=base.getDate(); }
 
-  // N월 N일
+  // N월 N일 (명시 날짜가 있으면 최우선)
   const md = t.match(/(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
-  if(md){ month=parseInt(md[1]); day=parseInt(md[2]); }
-  else{
-    const dOnly = t.match(/(\d{1,2})\s*일/);
-    if(dOnly && month===null){ month=now.getMonth()+1; day=parseInt(dOnly[1]); }
-  }
+  if(md){ month=parseInt(md[1]); day=parseInt(md[2]); year=now.getFullYear(); }
 
   // 오전/오후 + N시 M분
   const ampm = /(오후|저녁|밤|낮)/.test(t) ? "pm" : (/(오전|새벽|아침)/.test(t) ? "am" : null);
@@ -233,11 +238,12 @@ function parseKorean(text){
     else if(hm[2]) min = parseInt(hm[2]);
     if(ampm==="pm" && hour < 12) hour += 12;
     if(ampm==="am" && hour === 12) hour = 0;
-    // 오전/오후 명시 없이 1~7시는 통상 오후로 보정하지 않음(그대로 둠)
   }
 
-  // 제목 추출: 날짜/시간 토큰과 '기록/등록/추가/일정' 명령어 제거
+  // 제목 추출: 날짜/시간/요일 토큰과 명령어 제거
   let title = t
+    .replace(/(다음\s*주|이번\s*주|담주|다음주|이번주)/g,'')
+    .replace(/(월|화|수|목|금|토|일)\s*요일/g,'')
     .replace(/\d{1,2}\s*월\s*\d{1,2}\s*일/g,'')
     .replace(/\d{1,2}\s*일/g,'')
     .replace(/(오전|오후|저녁|밤|낮|새벽|아침|오늘|내일|모레|내일모레)/g,'')
@@ -246,15 +252,9 @@ function parseKorean(text){
     .replace(/\s+/g,' ').trim();
   if(!title) title = "일정";
 
-  // 유효성
+  // 유효성 (날짜 미지정 시 오늘, 시간 미지정 시 오전 9시)
   if(month===null || day===null){ month = now.getMonth()+1; day = now.getDate(); }
-  if(hour===null){ hour = 9; } // 시간 미지정 시 오전 9시
-
-  // 연도 보정: 지정 월이 이미 지났으면 내년
-  const cand = new Date(year, month-1, day, hour, min);
-  if(cand < new Date(now.getTime()-6*3600*1000) && !md && !/오늘|내일|모레/.test(t)){
-    // 과거로 보이면 그대로 (사용자 판단), 자동 내년화는 하지 않음
-  }
+  if(hour===null){ hour = 9; }
   return { title, year, month, day, hour, min };
 }
 
